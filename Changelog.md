@@ -1,6 +1,46 @@
 ### Development
 [Full Changelog](https://github.com/rspec/rspec-rails/compare/v8.0.4...main)
 
+Enhancements:
+
+* Bridge rspec-core's parallel runner lifecycle into Rails'
+  `ActiveSupport::Testing::Parallelization` hook registry. Wired
+  automatically on `require "rspec/rails"` -- no explicit opt-in call
+  required. User code that registers
+  `ActiveSupport::TestCase.parallelize_setup` /
+  `parallelize_teardown` blocks then fires during `rspec --parallel`
+  runs, with per-worker databases created automatically by
+  `ActiveRecord::TestDatabases`. No-op on rspec-core versions that
+  pre-date the parallel runner and when the suite runs serially.
+  (Jake Moffatt, #2104)
+* Per-worker Capybara `server_port` assignment under `--parallel` so
+  system specs don't collide on port 9000 across workers. Each worker
+  gets a 1000-port band starting above
+  `RSpec.configuration.parallel_server_port_base` (default 9000).
+  (Jake Moffatt, #2104)
+* Per-worker `Rails.logger` redirect to `log/test-<worker_number>.log`
+  (preserving the previous logger's formatter and level) so concurrent
+  worker output no longer interleaves into a single `log/test.log`.
+  (Jake Moffatt, #2104)
+* Set `ActiveSupport.parallelize_test_databases = true` on Rails 8.1+
+  so `ActiveRecord::TestDatabases`' after-fork hook actually runs.
+  Rails normally asserts this from inside
+  `ActiveSupport::TestCase.parallelize(...)` -- the Minitest entry
+  point -- which rspec-rails apps never call, so app config that
+  disabled the flag previously left every worker sharing the master's
+  database. (Jake Moffatt, #2104)
+* `rails generate rspec:install` enables parallel testing by default
+  for new projects by emitting
+  `config.default_parallel_workers = :number_of_processors if Process.respond_to?(:fork)`
+  in the generated `rails_helper.rb`, mirroring `rails new`'s
+  `parallelize(workers: :number_of_processors)` default.
+  `bundle exec rspec` runs parallel on forking platforms; `--parallel 1`
+  or `--no-parallel` forces serial. (Jake Moffatt, #2104)
+* `config.use_rails_parallel!` remains available as an idempotent no-op
+  for existing `rails_helper.rb` files that call it, and as an explicit
+  opt-in for apps that initialize RSpec in a non-standard order. New
+  projects don't need to call it. (Jake Moffatt, #2104)
+
 ### 8.0.4 / 2026-03-10
 [Full Changelog](https://github.com/rspec/rspec-rails/compare/v8.0.3...v8.0.4)
 
