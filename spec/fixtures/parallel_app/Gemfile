@@ -1,0 +1,11 @@
+source "https://rubygems.org"
+
+gem "rails"
+gem "sqlite3"
+
+rspec_root = File.expand_path("../../../../../rspec", __FILE__)
+gem "rspec-core",         path: File.join(rspec_root, "rspec-core")
+gem "rspec-expectations", path: File.join(rspec_root, "rspec-expectations")
+gem "rspec-mocks",        path: File.join(rspec_root, "rspec-mocks")
+gem "rspec-support",      path: File.join(rspec_root, "rspec-support")
+gem "rspec-rails",        path: File.expand_path("../../../..", __FILE__)
