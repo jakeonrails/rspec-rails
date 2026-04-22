@@ -76,7 +76,18 @@ RSpec.describe Rspec::Generators::ScaffoldGenerator, type: :generator do
     describe 'in an engine' do
       it 'generates files with Engine url_helpers' do
         in_sub_process do
-          allow_any_instance_of(::Rails::Generators::NamedBase).to receive(:mountable_engine?).and_return(true)
+          # `allow_any_instance_of(...).to receive(:mountable_engine?)` installs a
+          # public method override. Thor 1.5.0 then treats it as a registered command
+          # on the generator class and fails `invoke_all` with
+          # `Thor::UndefinedCommandError`. Prepend a module that redefines
+          # `mountable_engine?` as private instead.
+          mountable_engine_override = Module.new do
+            def mountable_engine?
+              true
+            end
+            private :mountable_engine?
+          end
+          ::Rails::Generators::NamedBase.prepend(mountable_engine_override)
           run_generator %w[posts --request_specs]
 
           expect(filename).to contain('Engine.routes.url_helpers')
