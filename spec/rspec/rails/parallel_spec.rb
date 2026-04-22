@@ -415,7 +415,12 @@ RSpec.describe RSpec::Rails::ParallelConfiguration do
     let(:configs)   { instance_double("ActiveRecord::DatabaseConfigurations") }
 
     before do
-      [primary, secondary].each { |c| allow(c).to receive(:_database=) }
+      [primary, secondary].each do |c|
+        allow(c).to receive(:_database=)
+        # Rails 8.1+ gates the schema reconstruction on `database_tasks?`.
+        # Older Rails versions don't call it; the stub is harmless there.
+        allow(c).to receive(:database_tasks?).and_return(true)
+      end
       # Rails 8.1+ passes `include_hidden: true`; earlier Rails does not.
       allow(configs).to receive(:configs_for).with(hash_including(env_name: "test")).and_return([primary, secondary])
       allow(ActiveRecord::Base).to receive(:configurations).and_return(configs)

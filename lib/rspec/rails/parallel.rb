@@ -17,6 +17,9 @@ module RSpec
     # is a no-op. Require-order safe: works whether or not Rails is loaded.
     class ParallelConfiguration
       class << self
+        # @api private
+        # Wires rspec-core's parallel lifecycle into the Rails parallel hooks
+        # registered on the given `RSpec.configuration`. Idempotent per config.
         def initialize_parallel_configuration(config)
           return unless parallel_api_available?(config)
           return unless initialized_configs.add?(config.object_id)
@@ -51,6 +54,9 @@ module RSpec
             config.respond_to?(:parallelize_teardown)
         end
 
+        # @api private
+        # Invokes every `ActiveSupport::Testing::Parallelization.after_fork_hook`
+        # with the worker number, matching Rails' Minitest behavior.
         def fire_after_fork_hooks(worker_number)
           return unless parallelization_defined?
 
@@ -59,6 +65,9 @@ module RSpec
           end
         end
 
+        # @api private
+        # Invokes every `ActiveSupport::Testing::Parallelization.run_cleanup_hook`
+        # with the worker number, matching Rails' Minitest behavior.
         def fire_cleanup_hooks(worker_number)
           return unless parallelization_defined?
 
