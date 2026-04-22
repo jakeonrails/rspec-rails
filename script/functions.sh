@@ -88,7 +88,7 @@ function run_specs_and_record_done {
 function run_specs_one_by_one {
   echo "Running each spec file, one-by-one..."
 
-  for file in `find spec -iname '*_spec.rb'`; do
+  for file in `find spec -iname '*_spec.rb' -not -path 'spec/fixtures/*'`; do
     echo "Running $file"
     bin/rspec $file -b --format progress
   done
