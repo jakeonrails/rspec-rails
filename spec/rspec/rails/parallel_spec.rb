@@ -97,12 +97,20 @@ RSpec.describe RSpec::Rails::ParallelConfiguration do
     end
   end
 
-  describe "hook registration is idempotent",
-           if: RSpec::Rails::ParallelConfiguration.parallel_api_available?(RSpec::Core::Configuration.new) do
+  # Runtime skip rather than `:if:` metadata: on rspec-core 4.x, `:if:` no longer
+  # filters example groups, so the tests inside would run and fail when the
+  # parallel API is absent. The integration describe block below uses the same
+  # pattern.
+  describe "hook registration is idempotent" do
     let(:real_config) { RSpec::Core::Configuration.new }
     let(:fake_parallelization) { Module.new }
 
     before do
+      unless described_class.parallel_api_available?(real_config) &&
+             real_config.respond_to?(:fire_parallelize_setup_hooks) &&
+             real_config.respond_to?(:fire_parallelize_teardown_hooks)
+        skip "rspec-core parallel API unavailable"
+      end
       described_class.reset_initialized_configs!
       stub_const("ActiveSupport::Testing::Parallelization", fake_parallelization)
       allow(described_class).to receive(:ensure_active_record_hooks_loaded)
@@ -301,7 +309,11 @@ RSpec.describe RSpec::Rails::ParallelConfiguration do
     let(:fake_parallelization) { Module.new }
 
     before do
-      skip "rspec-core parallel API unavailable" unless described_class.parallel_api_available?(real_config)
+      unless described_class.parallel_api_available?(real_config) &&
+             real_config.respond_to?(:fire_parallelize_setup_hooks) &&
+             real_config.respond_to?(:fire_parallelize_teardown_hooks)
+        skip "rspec-core parallel API unavailable"
+      end
       stub_const("ActiveSupport::Testing::Parallelization", fake_parallelization)
       allow(described_class).to receive(:ensure_active_record_hooks_loaded)
     end
