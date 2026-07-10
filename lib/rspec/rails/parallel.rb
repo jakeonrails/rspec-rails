@@ -2,10 +2,12 @@ module RSpec
   module Rails
     # Bridges rspec-core's parallel runner lifecycle with Rails' existing
     # parallel testing hooks (`ActiveSupport::Testing::Parallelization`).
-    # Opt-in via `config.use_rails_parallel!` from `rails_helper.rb`; once
-    # enabled, user code written against
+    # Wired automatically on `require "rspec/rails"` (see the bottom of
+    # this file); user code written against
     # `ActiveSupport::TestCase.parallelize_setup { |worker| ... }` executes
     # during RSpec's parallel runs exactly as it would under Minitest.
+    # `config.use_rails_parallel!` remains as an idempotent explicit
+    # opt-in for apps that initialize RSpec in a non-standard order.
     #
     # Bridged lifecycle points:
     #
@@ -256,8 +258,8 @@ module RSpec
 
         # Resilient against a Configuration instance that hasn't had
         # rspec-rails' initialize_configuration called on it (e.g. a fresh
-        # RSpec::Core::Configuration.new in tests). 9000 matches the RFC
-        # default and Capybara's own default port.
+        # RSpec::Core::Configuration.new in tests). 9000 matches the
+        # `parallel_server_port_base` setting default in configuration.rb.
         def parallel_server_port_base
           if RSpec.configuration.respond_to?(:parallel_server_port_base)
             RSpec.configuration.parallel_server_port_base || 9000
