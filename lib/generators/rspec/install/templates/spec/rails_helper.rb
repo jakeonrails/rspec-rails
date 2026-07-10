@@ -53,28 +53,35 @@ RSpec.configure do |config|
   # You can uncomment this line to turn off ActiveRecord support entirely.
   # config.use_active_record = false
 
-  # Run specs in parallel by default when fork is available. Each worker
-  # runs against its own database (<database>_<worker_number>), per-worker
-  # logs land in log/test-<worker_number>.log, and Capybara gets a
-  # per-worker server port. Set to an integer to cap workers, or remove
-  # this line to make `rspec` serial unless `--parallel` is passed on the
-  # CLI.
+  # Uncomment to run specs in parallel across CPU cores when `fork` is
+  # available. Each worker gets its own database
+  # (<database>_<worker_number>, or <database>-<worker_number> on Rails
+  # <= 8.0), its own log/test-<worker_number>.log, and its own Capybara
+  # port. Set the value to an integer instead of :number_of_processors to
+  # cap the worker count.
   #
-  # Register additional per-worker setup/teardown here (Redis namespacing,
-  # tmpfile dirs, extra service connections):
-  #   config.parallelize_setup    { |worker| ... }
-  #   config.parallelize_teardown { |worker| ... }
-  # Inside any spec, the current worker number is available as
-  # `RSpec.parallel_worker_number` (nil outside parallel runs).
-  if config.respond_to?(:default_parallel_workers=) && Process.respond_to?(:fork)
-    config.default_parallel_workers = :number_of_processors
-  end
+  # Biggest gotcha: a `before(:suite)` block in this file runs only in
+  # this parent process and never reaches forked workers, so seeding done
+  # there is invisible to every worker's database. Move that seeding into
+  # `config.parallelize_setup { |worker| ... }` instead, which runs once
+  # per worker after its database exists.
+  #
+  # See features/Parallel.md for the full write-up (CLI flags, known
+  # interactions with SimpleCov/JUnit/VCR/parallel_tests, etc).
+  #
+  # if config.respond_to?(:default_parallel_workers=) && Process.respond_to?(:fork)
+  #   config.default_parallel_workers = :number_of_processors
+  # end
 
-  # With `use_transactional_fixtures` on, each example already runs inside
-  # a transaction that rolls back -- so Rails' post-run truncation of every
-  # table in every per-worker DB is redundant and (on large schemas) slow.
-  # Uncomment to skip it:
+  # Rails truncates each per-worker database at worker BOOT (not after the
+  # run) when its schema is already up to date. With
+  # `use_transactional_fixtures` on, every example already rolls back its
+  # own transaction, so that boot-time truncation is redundant -- and slow
+  # on large schemas. Uncomment to skip it:
   #   ENV['SKIP_TEST_DATABASE_TRUNCATE'] ||= '1'
+  # Caveat: skipping it means data committed outside a transaction by a
+  # previous run (aborted mid-suite, or written by non-transactional
+  # examples) persists into the next run instead of being wiped.
 
 <% else -%>
   # Remove this line to enable support for ActiveRecord

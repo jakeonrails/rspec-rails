@@ -47,8 +47,12 @@ RSpec.describe Rspec::Generators::InstallGenerator, type: :generator do
     match(/config\.filter_rails_from_backtrace!/m)
   end
 
+  def mention_parallel_workers
+    match(/#\s*config\.default_parallel_workers = :number_of_processors/m)
+  end
+
   def default_to_parallel_workers
-    match(/config\.default_parallel_workers = :number_of_processors/m)
+    match(/^\s*config\.default_parallel_workers = :number_of_processors/m)
   end
 
   def mention_skip_test_database_truncate
@@ -109,9 +113,10 @@ RSpec.describe Rspec::Generators::InstallGenerator, type: :generator do
       expect(rails_helper).to maintain_test_schema
     end
 
-    specify "defaults to parallel workers when fork is available" do
+    specify "mentions parallel workers as a commented-out opt-in" do
       run_generator
-      expect(rails_helper).to default_to_parallel_workers
+      expect(rails_helper).to mention_parallel_workers
+      expect(rails_helper).not_to default_to_parallel_workers
     end
 
     specify "mentions SKIP_TEST_DATABASE_TRUNCATE for transactional-fixtures users" do
