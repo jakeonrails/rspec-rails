@@ -2,7 +2,7 @@ require "fileutils"
 require "shellwords"
 
 # End-to-end integration: boot a real Rails app, run it under
-# `rspec --parallel 2`, and assert per-worker SQLite databases were
+# `rspec --parallel=2`, and assert per-worker SQLite databases were
 # created and per-worker logs received the SQL. Opted in via
 # RSPEC_RAILS_FULL_INTEGRATION=1 because the `bundle install` +
 # two-worker run is slow relative to the rest of the suite.

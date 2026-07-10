@@ -25,6 +25,8 @@ module RSpec
     #
     # When rspec-core does not yet expose the parallel API, initialization
     # is a no-op. Require-order safe: works whether or not Rails is loaded.
+    #
+    # @private
     class ParallelConfiguration # rubocop:disable Metrics/ClassLength
       # Highest valid TCP port; per-worker Capybara ports must not pass it.
       MAX_TCP_PORT = 65_535

@@ -27,17 +27,25 @@ per-worker database, and runs the suite. Before flipping it on, read
 
 ```sh
 bundle exec rspec                  # parallel when default_parallel_workers is set
-bundle exec rspec --parallel 4     # 4 workers
-bundle exec rspec --parallel       # default_parallel_workers, or processor count
-bundle exec rspec --parallel 1     # force single-process
+bundle exec rspec --parallel=4     # 4 workers
+bundle exec rspec --parallel       # enable; count resolved as described below
+bundle exec rspec --parallel=1     # force single-process
 bundle exec rspec --no-parallel    # force single-process
 PARALLEL_WORKERS=8 bundle exec rspec
 ```
 
-Precedence, highest first: CLI flag, `PARALLEL_WORKERS` env,
-`parallel_workers` config, `default_parallel_workers` config. A worker
-count of 0 or 1 means single-process. Bare `--parallel` uses
-`default_parallel_workers` when set, otherwise the processor count.
+The `=` matters: because the flag's argument is optional, a space-form
+`--parallel 4` is parsed as bare `--parallel` plus a spec file named
+`4` — always write `--parallel=N`.
+
+Precedence, highest first: an explicit `--parallel=N`, then
+`--no-parallel` (which forces a serial run, overriding
+`PARALLEL_WORKERS` and both config settings), then the
+`PARALLEL_WORKERS` env variable, then `parallel_workers` config, then
+`default_parallel_workers` config. A worker count of 0 or 1 means
+single-process. Bare `--parallel` just enables parallel execution and
+takes its count from `PARALLEL_WORKERS` when set, then
+`default_parallel_workers`, then the processor count.
 On platforms without `fork` (Windows, JRuby), requesting parallel warns
 once and runs serially.
 
@@ -55,15 +63,22 @@ parallel run forks workers, each worker (numbered from 0):
    Rails 8.1+, `<database>-<worker_number>` on Rails 8.0 and earlier.
    Multi-database setups (primary, replica, secondary) all get per-worker
    copies. Rails 8.1's `config.active_support.parallelize_test_databases
-   = false` opt-out is respected. If per-worker database setup fails, the
-   run fails loudly with the worker number in the error instead of
-   degrading into workers that share one database.
+   = false` opt-out is respected. If per-worker database setup fails,
+   that worker exits and the run fails with an error naming the worker
+   (it surfaces as a `parallelize_setup` hook failure); the surviving
+   workers still run the remaining groups, so you get the real failure
+   *and* the rest of your results instead of a green-looking degraded
+   run.
 2. **Writes to its own log file.** Logging is redirected to
    `log/test-<worker_number>.log`, preserving the parent logger's
    formatter and level. When `Rails.logger` is a `BroadcastLogger` (the
    Rails default), its sinks are swapped in place, so framework
    components that captured the logger at boot reroute too. `log/test.log`
-   no longer interleaves; debug with `tail -f log/test-*.log`.
+   no longer interleaves; debug with `tail -f log/test-*.log`. Note the
+   swap replaces *all* of the broadcast's sinks inside a worker — a
+   custom sink you added (say, one writing to STDOUT) won't emit from
+   workers. That's deliberate: worker writes to stdout would corrupt
+   the parent's formatter stream.
 3. **Gets its own Capybara port.** When Capybara is loaded and
    `Capybara.server_port` is nil (its default), each worker is assigned
    `parallel_server_port_base + worker_number` (9000, 9001, ... by
@@ -229,7 +244,7 @@ over unchanged. Things to remove when cutting over:
 
 ## When parallelism is a no-op
 
-- `--no-parallel` / `--parallel 1` / no configured workers: no hooks
+- `--no-parallel` / `--parallel=1` / no configured workers: no hooks
   fire, no per-worker resources are allocated, nothing changes.
 - Platforms without `fork` (Windows, JRuby): a requested parallel run
   warns once and runs serially.
