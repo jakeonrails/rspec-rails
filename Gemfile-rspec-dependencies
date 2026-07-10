@@ -1,10 +1,31 @@
 branch = ENV['MAINTENANCE_BRANCH'] || File.read(File.expand_path("../maintenance-branch", __FILE__)).chomp
 
+# Resolve the rspec monorepo checkout that supplies rspec-core & friends.
+# Defaults to the conventional sibling checkout (`../rspec`); override with
+# RSPEC_MONOREPO_PATH when your checkout lives elsewhere.
+monorepo_path = ENV['RSPEC_MONOREPO_PATH'] || File.expand_path("../../rspec", __FILE__)
+
 %w[rspec rspec-core rspec-expectations rspec-mocks rspec-support].each do |lib|
-  library_path = File.expand_path("../../rspec/#{lib}", __FILE__)
+  library_path = File.join(monorepo_path, lib)
   if File.exist?(library_path) && !ENV['USE_GIT_REPOS']
     gem lib, path: library_path, require: false
+  elsif ENV['RSPEC_MONOREPO_PATH']
+    # An explicitly configured path that doesn't resolve is a broken setup;
+    # falling back to the upstream git source would silently test against
+    # the wrong rspec-core. Fail fast instead.
+    raise "RSPEC_MONOREPO_PATH is set to #{ENV['RSPEC_MONOREPO_PATH'].inspect} " \
+          "but #{library_path} does not exist. Fix the path (it must contain " \
+          "the rspec monorepo's #{lib}/ directory)."
   else
+    unless ENV['USE_GIT_REPOS']
+      warn "=" * 78
+      warn "WARNING: #{library_path} not found; falling back to " \
+           "https://github.com/rspec/rspec (branch #{branch}) for #{lib}."
+      warn "Local changes to rspec-core & friends will NOT be picked up. Set"
+      warn "RSPEC_MONOREPO_PATH=/path/to/rspec to use a local monorepo checkout,"
+      warn "or USE_GIT_REPOS=1 to silence this warning."
+      warn "=" * 78
+    end
     gem lib, git: "https://github.com/rspec/rspec", glob: "#{lib}/#{lib}.gemspec", branch: branch
   end
 end
