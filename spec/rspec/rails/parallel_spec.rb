@@ -41,8 +41,9 @@ RSpec.describe RSpec::Rails::ParallelConfiguration do
     context "when rspec-core exposes the parallel API" do
       let(:fake_parallel_config) do
         Class.new do
-          attr_reader :setup_block, :teardown_block
+          attr_reader :before_fork_block, :setup_block, :teardown_block
 
+          def parallelize_before_fork(&blk) = @before_fork_block = blk
           def parallelize_setup(&blk) = @setup_block = blk
           def parallelize_teardown(&blk) = @teardown_block = blk
         end.new
@@ -52,17 +53,57 @@ RSpec.describe RSpec::Rails::ParallelConfiguration do
         allow(described_class).to receive(:ensure_active_record_hooks_loaded)
       end
 
-      it "registers blocks for both lifecycle points" do
+      # Prevents in-process ENV / Capybara / logger mutation when specs
+      # invoke the captured setup block directly.
+      def stub_per_worker_assignments
+        allow(described_class).to receive(:assign_test_env_number)
+        allow(described_class).to receive(:assign_parallel_worker_id)
+        allow(described_class).to receive(:redirect_rails_logger)
+        allow(described_class).to receive(:assign_capybara_port)
+      end
+
+      it "registers blocks for all three lifecycle points" do
         described_class.initialize_parallel_configuration(fake_parallel_config)
 
+        expect(fake_parallel_config.before_fork_block).to be_a(Proc)
         expect(fake_parallel_config.setup_block).to be_a(Proc)
         expect(fake_parallel_config.teardown_block).to be_a(Proc)
       end
 
+      it "tolerates a config without parallelize_before_fork (older parallel API)" do
+        config = Class.new do
+          attr_reader :setup_block, :teardown_block
+
+          def parallelize_setup(&blk) = @setup_block = blk
+          def parallelize_teardown(&blk) = @teardown_block = blk
+        end.new
+
+        expect { described_class.initialize_parallel_configuration(config) }.not_to raise_error
+        expect(config.setup_block).to be_a(Proc)
+      end
+
+      it "the before_fork block fans out to Rails' before_fork hooks" do
+        described_class.initialize_parallel_configuration(fake_parallel_config)
+        expect(described_class).to receive(:fire_before_fork_hooks)
+        fake_parallel_config.before_fork_block.call
+      end
+
       it "the setup block fans out with the worker number" do
         described_class.initialize_parallel_configuration(fake_parallel_config)
+        stub_per_worker_assignments
         expect(described_class).to receive(:fire_after_fork_hooks).with(3)
         fake_parallel_config.setup_block.call(3)
+      end
+
+      it "the setup block re-checks ActiveRecord hook registration (load-order safety)" do
+        described_class.initialize_parallel_configuration(fake_parallel_config)
+        stub_per_worker_assignments
+        allow(described_class).to receive(:fire_after_fork_hooks)
+
+        fake_parallel_config.setup_block.call(0)
+
+        # Once at initialization time, once inside the worker setup hook.
+        expect(described_class).to have_received(:ensure_active_record_hooks_loaded).twice
       end
 
       # User code registered via `ActiveSupport::TestCase.parallelize_setup`
@@ -74,6 +115,8 @@ RSpec.describe RSpec::Rails::ParallelConfiguration do
         described_class.initialize_parallel_configuration(fake_parallel_config)
 
         call_order = []
+        allow(described_class).to receive(:assign_test_env_number) { call_order << :test_env_number }
+        allow(described_class).to receive(:assign_parallel_worker_id) { call_order << :worker_id }
         allow(described_class).to receive(:redirect_rails_logger) { call_order << :logger }
         allow(described_class).to receive(:assign_capybara_port) { call_order << :port }
         allow(described_class).to receive(:fire_after_fork_hooks) { call_order << :user_hooks }
@@ -81,7 +124,7 @@ RSpec.describe RSpec::Rails::ParallelConfiguration do
         fake_parallel_config.setup_block.call(0)
 
         expect(call_order.last).to eq(:user_hooks)
-        expect(call_order).to include(:logger, :port)
+        expect(call_order).to include(:test_env_number, :worker_id, :logger, :port)
       end
 
       it "the teardown block fans out with the worker number" do
@@ -114,6 +157,12 @@ RSpec.describe RSpec::Rails::ParallelConfiguration do
       described_class.reset_initialized_configs!
       stub_const("ActiveSupport::Testing::Parallelization", fake_parallelization)
       allow(described_class).to receive(:ensure_active_record_hooks_loaded)
+      # Firing the setup hooks in-process must not leak per-worker state
+      # (ENV, Capybara port, logger) into the host suite.
+      allow(described_class).to receive(:assign_test_env_number)
+      allow(described_class).to receive(:assign_parallel_worker_id)
+      allow(described_class).to receive(:redirect_rails_logger)
+      allow(described_class).to receive(:assign_capybara_port)
     end
 
     after { described_class.reset_initialized_configs! }
@@ -163,6 +212,31 @@ RSpec.describe RSpec::Rails::ParallelConfiguration do
       stub_const("ActiveSupport::Testing::Parallelization", fake_parallelization)
     end
 
+    describe ".fire_before_fork_hooks" do
+      it "invokes each registered before_fork_hook (no arguments, parent side)" do
+        call_log = []
+        fake_parallelization.define_singleton_method(:before_fork_hooks) do
+          [proc { call_log << :a }, proc { call_log << :b }]
+        end
+
+        described_class.fire_before_fork_hooks
+
+        expect(call_log).to eq([:a, :b])
+      end
+
+      it "is a no-op when Rails has no before_fork registry (pre-8.1)" do
+        # fake_parallelization deliberately lacks .before_fork_hooks, mirroring
+        # Rails 7.2/8.0 -- whose own Minitest parallelization performs no
+        # pre-fork work either, so there is genuinely nothing to fire.
+        expect { described_class.fire_before_fork_hooks }.not_to raise_error
+      end
+
+      it "is a no-op when Parallelization is not defined" do
+        hide_const("ActiveSupport::Testing::Parallelization")
+        expect { described_class.fire_before_fork_hooks }.not_to raise_error
+      end
+    end
+
     describe ".fire_after_fork_hooks" do
       it "invokes each registered after_fork_hook with the worker number" do
         call_log = []
@@ -178,6 +252,29 @@ RSpec.describe RSpec::Rails::ParallelConfiguration do
       it "is a no-op when Parallelization is not defined" do
         hide_const("ActiveSupport::Testing::Parallelization")
         expect { described_class.fire_after_fork_hooks(0) }.not_to raise_error
+      end
+
+      context "when a hook fails (e.g. per-worker database creation)" do
+        before do
+          fake_parallelization.define_singleton_method(:after_fork_hooks) do
+            [proc { |_n| raise ArgumentError, "could not create app_test-3" }]
+          end
+        end
+
+        it "re-raises with worker attribution so the run fails loudly" do
+          expect { described_class.fire_after_fork_hooks(3) }.to raise_error(
+            RuntimeError,
+            /rspec-rails parallel: worker 3 failed to prepare test database.*ArgumentError: could not create app_test-3/
+          )
+        end
+
+        it "preserves the original exception as the cause" do
+          described_class.fire_after_fork_hooks(3)
+          raise "expected fire_after_fork_hooks to raise"
+        rescue RuntimeError => e
+          expect(e.cause).to be_an(ArgumentError)
+          expect(e.cause.message).to eq("could not create app_test-3")
+        end
       end
     end
 
@@ -200,6 +297,72 @@ RSpec.describe RSpec::Rails::ParallelConfiguration do
     end
   end
 
+  describe ".assign_test_env_number" do
+    around do |example|
+      had_value = ENV.key?("TEST_ENV_NUMBER")
+      original  = ENV["TEST_ENV_NUMBER"]
+      ENV.delete("TEST_ENV_NUMBER")
+      example.run
+    ensure
+      had_value ? ENV["TEST_ENV_NUMBER"] = original : ENV.delete("TEST_ENV_NUMBER")
+    end
+
+    # parallel_tests default convention: first worker gets the empty string,
+    # subsequent workers get "2", "3", ... so ecosystem tooling keyed off
+    # TEST_ENV_NUMBER (SimpleCov, Redis namespacing, database.yml suffixes)
+    # works unchanged.
+    it "sets the empty string for worker 0" do
+      described_class.assign_test_env_number(0)
+      expect(ENV.fetch("TEST_ENV_NUMBER", :unset)).to eq("")
+    end
+
+    it "sets worker_number + 1 for later workers" do
+      described_class.assign_test_env_number(1)
+      expect(ENV["TEST_ENV_NUMBER"]).to eq("2")
+
+      ENV.delete("TEST_ENV_NUMBER")
+      described_class.assign_test_env_number(6)
+      expect(ENV["TEST_ENV_NUMBER"]).to eq("7")
+    end
+
+    it "leaves a value already present in the environment alone" do
+      ENV["TEST_ENV_NUMBER"] = "42"
+      described_class.assign_test_env_number(0)
+      expect(ENV["TEST_ENV_NUMBER"]).to eq("42")
+    end
+
+    it "treats a pre-existing empty string as already set" do
+      ENV["TEST_ENV_NUMBER"] = ""
+      described_class.assign_test_env_number(3)
+      expect(ENV["TEST_ENV_NUMBER"]).to eq("")
+    end
+  end
+
+  describe ".assign_parallel_worker_id" do
+    it "sets ActiveSupport::TestCase.parallel_worker_id when the writer exists (Rails 8.1+)" do
+      fake_test_case = Class.new do
+        class << self
+          attr_accessor :parallel_worker_id
+        end
+      end
+      stub_const("ActiveSupport::TestCase", fake_test_case)
+
+      described_class.assign_parallel_worker_id(5)
+
+      expect(fake_test_case.parallel_worker_id).to eq(5)
+    end
+
+    it "is a no-op when the writer is absent (pre-8.1)" do
+      stub_const("ActiveSupport::TestCase", Class.new)
+      expect { described_class.assign_parallel_worker_id(5) }.not_to raise_error
+    end
+
+    it "is a no-op when ActiveSupport::TestCase is not defined" do
+      hide_const("ActiveSupport::TestCase") if defined?(::ActiveSupport::TestCase)
+      expect { described_class.assign_parallel_worker_id(5) }.not_to raise_error
+    end
+  end
+
   describe ".assign_capybara_port" do
     context "when Capybara is not loaded" do
       before { allow(described_class).to receive(:capybara_defined?).and_return(false) }
@@ -214,33 +377,62 @@ RSpec.describe RSpec::Rails::ParallelConfiguration do
 
     context "when Capybara is loaded" do
       let(:original_port) { ::Capybara.server_port }
-      after { ::Capybara.server_port = original_port }
 
-      it "puts worker 0 in the 9001-9999 band by default" do
-        described_class.assign_capybara_port(0)
-        expect(::Capybara.server_port).to be_between(9001, 9999)
+      before do
+        original_port # capture before any assignment
+        ::Capybara.server_port = nil
       end
 
-      it "puts worker N in a band 1000 above worker N-1" do
-        described_class.assign_capybara_port(0)
-        worker0 = ::Capybara.server_port
-        described_class.assign_capybara_port(1)
-        worker1 = ::Capybara.server_port
+      after { ::Capybara.server_port = original_port }
 
-        expect(worker1).to be_between(10_001, 10_999)
-        expect(worker1 - worker0).to be_between(2, 1998)
+      it "assigns dense per-worker ports: base + worker_number" do
+        # Each assignment happens once per freshly forked worker, where
+        # Capybara.server_port is still nil; reset between calls to mirror
+        # that (a non-nil port at hook time means the user pinned it).
+        described_class.assign_capybara_port(0)
+        expect(::Capybara.server_port).to eq(9000)
+
+        ::Capybara.server_port = nil
+        described_class.assign_capybara_port(1)
+        expect(::Capybara.server_port).to eq(9001)
+
+        # Stays valid even on very wide CI boxes (worker 57 used to
+        # overflow the old band scheme past 65535).
+        ::Capybara.server_port = nil
+        described_class.assign_capybara_port(57)
+        expect(::Capybara.server_port).to eq(9057)
       end
 
       it "honors RSpec.configuration.parallel_server_port_base" do
         allow(RSpec.configuration).to receive(:parallel_server_port_base).and_return(20_000)
         described_class.assign_capybara_port(2)
-        expect(::Capybara.server_port).to be_between(22_001, 22_999)
+        expect(::Capybara.server_port).to eq(20_002)
       end
 
-      it "never picks the literal base port (so the user's default stays free)" do
-        100.times do
+      it "raises when the computed port would exceed the maximum TCP port" do
+        allow(RSpec.configuration).to receive(:parallel_server_port_base).and_return(65_530)
+
+        expect { described_class.assign_capybara_port(6) }.to raise_error(
+          ArgumentError, /port 65536.*exceeds the maximum TCP port/m
+        )
+        expect(::Capybara.server_port).to be_nil
+      end
+
+      context "when the user has pinned Capybara.server_port" do
+        before { ::Capybara.server_port = 4321 }
+
+        it "leaves the user's port untouched" do
+          allow(RSpec).to receive(:warn_with)
+          described_class.assign_capybara_port(1)
+          expect(::Capybara.server_port).to eq(4321)
+        end
+
+        it "warns once (from worker 0 only) about the cross-worker collision" do
+          expect(RSpec).to receive(:warn_with).with(/Capybara\.server_port is explicitly set to 4321/).once
+
           described_class.assign_capybara_port(0)
-          expect(::Capybara.server_port).not_to eq(9000)
+          described_class.assign_capybara_port(1)
+          described_class.assign_capybara_port(2)
         end
       end
     end
@@ -297,6 +489,87 @@ RSpec.describe RSpec::Rails::ParallelConfiguration do
         expect(wrapped.level).to eq(::Logger::WARN)
         expect(wrapped.formatter.call(nil, nil, nil, "x")).to eq("fmt:x\n")
       end
+
+      # Framework components (ActiveRecord::Base & co.) capture the boot-time
+      # logger by reference (`self.logger ||= ::Rails.logger` in railtie
+      # on_load hooks). With a non-broadcast logger the only way to reroute
+      # their output is to reassign each component that still points at the
+      # old instance.
+      it "reassigns framework component loggers that pointed at the old Rails.logger" do
+        component = Class.new do
+          class << self
+            attr_accessor :logger
+          end
+        end
+        component.logger = original_logger
+        stub_const("ActiveRecord::Base", component)
+
+        described_class.send(:redirect_rails_logger, 2)
+
+        expect(component.logger).to equal(::Rails.logger)
+        component.logger.warn("sql from worker 2")
+        component.logger.close if component.logger.respond_to?(:close)
+        expect(File.read(File.join(tmpdir, "log", "test-2.log"))).to include("sql from worker 2")
+      end
+
+      it "leaves a component's dedicated custom logger alone" do
+        custom = ::ActiveSupport::Logger.new(File::NULL)
+        component = Class.new do
+          class << self
+            attr_accessor :logger
+          end
+        end
+        component.logger = custom
+        stub_const("ActiveRecord::Base", component)
+
+        described_class.send(:redirect_rails_logger, 2)
+
+        expect(component.logger).to equal(custom)
+      end
+    end
+
+    context "when Rails.logger is an ActiveSupport::BroadcastLogger" do
+      let(:tmpdir) { Dir.mktmpdir("rspec-rails-parallel-log-") }
+      let(:shared_log_path) { File.join(tmpdir, "log", "test.log") }
+      let(:original_sink) do
+        FileUtils.mkdir_p(File.dirname(shared_log_path))
+        ::ActiveSupport::Logger.new(shared_log_path).tap { |l| l.level = ::Logger::INFO }
+      end
+      let(:original_logger) { ::ActiveSupport::BroadcastLogger.new(original_sink) }
+      let(:rails_double) { double("Rails", root: Pathname.new(tmpdir), logger: original_logger) }
+
+      before do
+        stub_const("Rails", rails_double)
+        allow(rails_double).to receive(:logger=) { |new| allow(rails_double).to receive(:logger).and_return(new) }
+      end
+
+      after { FileUtils.remove_entry(tmpdir) }
+
+      it "swaps the sinks in place so every captured reference reroutes at once" do
+        # AR/AC/AJ captured this exact object at boot; identity must survive.
+        described_class.send(:redirect_rails_logger, 4)
+
+        expect(::Rails.logger).to equal(original_logger)
+        expect(original_logger.broadcasts).not_to include(original_sink)
+        expect(original_logger.broadcasts.size).to eq(1)
+      end
+
+      it "routes writes through a boot-captured reference into the per-worker file only" do
+        captured_by_component_at_boot = original_logger
+
+        described_class.send(:redirect_rails_logger, 4)
+        captured_by_component_at_boot.info("select * from posts")
+        original_logger.broadcasts.each { |sink| sink.close if sink.respond_to?(:close) }
+
+        worker_log = File.join(tmpdir, "log", "test-4.log")
+        expect(File.read(worker_log)).to include("select * from posts")
+        expect(File.read(shared_log_path)).not_to include("select * from posts")
+      end
+
+      it "inherits level from the original sink" do
+        described_class.send(:redirect_rails_logger, 4)
+        expect(original_logger.broadcasts.first.level).to eq(::Logger::INFO)
+      end
     end
   end
 
@@ -316,6 +589,27 @@ RSpec.describe RSpec::Rails::ParallelConfiguration do
       end
       stub_const("ActiveSupport::Testing::Parallelization", fake_parallelization)
       allow(described_class).to receive(:ensure_active_record_hooks_loaded)
+      # Firing the setup hooks in-process must not leak per-worker state
+      # (ENV, Capybara port, logger) into the host suite.
+      allow(described_class).to receive(:assign_test_env_number)
+      allow(described_class).to receive(:assign_parallel_worker_id)
+      allow(described_class).to receive(:redirect_rails_logger)
+      allow(described_class).to receive(:assign_capybara_port)
+    end
+
+    it "fires registered before_fork hooks on the parent via the real config surface" do
+      unless real_config.respond_to?(:parallelize_before_fork) &&
+             real_config.respond_to?(:fire_parallelize_before_fork_hooks)
+        skip "rspec-core parallelize_before_fork API unavailable"
+      end
+
+      call_log = []
+      fake_parallelization.define_singleton_method(:before_fork_hooks) { [proc { call_log << :before_fork }] }
+
+      described_class.initialize_parallel_configuration(real_config)
+      real_config.fire_parallelize_before_fork_hooks
+
+      expect(call_log).to eq([:before_fork])
     end
 
     it "fires registered setup hooks with the worker number via the real config surface" do
@@ -379,15 +673,18 @@ RSpec.describe RSpec::Rails::ParallelConfiguration do
 
   describe ".ensure_active_record_hooks_loaded",
            if: defined?(::ActiveRecord) do
-    # Rails 8.1+ gates ActiveRecord::TestDatabases' after_fork_hook on
-    # `ActiveSupport.parallelize_test_databases` (default true). App
-    # config or a stray assignment can disable it, and we never call
-    # `ActiveSupport::TestCase.parallelize`, the Minitest entry point
-    # that normally re-asserts it. Flip it on here so opting into
-    # `use_rails_parallel!` is sufficient. Rails 8.0 and earlier don't
-    # expose the accessor; the hook fires unconditionally and there's
-    # nothing to set.
-    it "flips ActiveSupport.parallelize_test_databases on when the accessor exists" do
+    it "loads ActiveRecord::TestDatabases so its fork hooks register" do
+      described_class.send(:ensure_active_record_hooks_loaded)
+      expect(defined?(::ActiveRecord::TestDatabases)).to be_truthy
+    end
+
+    # Rails 8.1+ gates ActiveRecord::TestDatabases' fork hooks on
+    # `ActiveSupport.parallelize_test_databases`, which already defaults to
+    # `true`. Assigning it here would clobber the documented app-level
+    # opt-out (`config.active_support.parallelize_test_databases = false`)
+    # and mutate global state even for serial runs, so we must never write
+    # to it.
+    it "never assigns ActiveSupport.parallelize_test_databases" do
       captured = []
       if ::ActiveSupport.respond_to?(:parallelize_test_databases=)
         # Rails 8.1+: rspec-mocks avoids the "method redefined" warning that
@@ -395,7 +692,8 @@ RSpec.describe RSpec::Rails::ParallelConfiguration do
         allow(::ActiveSupport).to receive(:parallelize_test_databases=) { |v| captured << v }
         described_class.send(:ensure_active_record_hooks_loaded)
       else
-        # Pre-Rails 8.1: install a shim so the hook path runs, then strip it.
+        # Pre-Rails 8.1: install a shim so an (unwanted) assignment would be
+        # captured, then strip it.
         ::ActiveSupport.singleton_class.send(:define_method, :parallelize_test_databases=) { |v| captured << v }
         begin
           described_class.send(:ensure_active_record_hooks_loaded)
@@ -403,13 +701,22 @@ RSpec.describe RSpec::Rails::ParallelConfiguration do
           ::ActiveSupport.singleton_class.send(:remove_method, :parallelize_test_databases=)
         end
       end
-      expect(captured).to eq([true])
+      expect(captured).to be_empty
     end
 
-    it "does nothing when ActiveSupport does not expose the accessor" do
-      allow(::ActiveSupport).to receive(:respond_to?).and_call_original
-      allow(::ActiveSupport).to receive(:respond_to?).with(:parallelize_test_databases=).and_return(false)
-      expect { described_class.send(:ensure_active_record_hooks_loaded) }.not_to raise_error
+    it "preserves an app-level opt-out of parallelize_test_databases" do
+      unless ::ActiveSupport.respond_to?(:parallelize_test_databases=)
+        skip "Rails < 8.1 has no parallelize_test_databases accessor"
+      end
+
+      original = ::ActiveSupport.parallelize_test_databases
+      begin
+        ::ActiveSupport.parallelize_test_databases = false
+        described_class.send(:ensure_active_record_hooks_loaded)
+        expect(::ActiveSupport.parallelize_test_databases).to be(false)
+      ensure
+        ::ActiveSupport.parallelize_test_databases = original
+      end
     end
   end
 
@@ -476,6 +783,20 @@ RSpec.describe RSpec::Rails::ParallelConfiguration do
     before do
       skip "Process.fork unavailable"                unless Process.respond_to?(:fork)
       skip "rspec-core parallel runner unavailable"  unless defined?(RSpec::Core::Parallel::Runner)
+
+      # Other specs in this suite may leak a Capybara.server_port (e.g.
+      # system spec `served_by` examples). Forked workers would then treat
+      # it as a user-pinned port and emit the collision warning, which
+      # rspec-support's spec harness escalates into a failure inside the
+      # worker. Fork from a clean slate; restored below.
+      if defined?(::Capybara)
+        @saved_capybara_server_port = ::Capybara.server_port
+        ::Capybara.server_port = nil
+      end
+    end
+
+    after do
+      ::Capybara.server_port = @saved_capybara_server_port if defined?(::Capybara)
     end
 
     let(:tmpdir)    { Dir.mktmpdir("rspec-rails-parallel") }
@@ -503,9 +824,13 @@ RSpec.describe RSpec::Rails::ParallelConfiguration do
 
     it "fires Rails-registered after_fork_hooks inside each worker with the right worker_number" do
       log = setup_log
+      before_fork_log = File.join(tmpdir, "before_fork.log")
       fake_parallelization = Module.new
       fake_parallelization.define_singleton_method(:after_fork_hooks) do
         [proc { |n| File.open(log, "a") { |f| f.puts "rails-hook:worker:#{n}:#{Process.pid}" } }]
+      end
+      fake_parallelization.define_singleton_method(:before_fork_hooks) do
+        [proc { File.open(before_fork_log, "a") { |f| f.puts "before-fork:#{Process.pid}" } }]
       end
       fake_parallelization.define_singleton_method(:run_cleanup_hooks) { [] }
       stub_const("ActiveSupport::Testing::Parallelization", fake_parallelization)
@@ -533,6 +858,14 @@ RSpec.describe RSpec::Rails::ParallelConfiguration do
         lines = File.readlines(setup_log)
         expect(lines.size).to eq(2)
         expect(lines.map { |l| l[/worker:(\d)/, 1] }.sort).to eq(%w[0 1])
+
+        # before_fork hooks fire exactly once, on the parent process,
+        # before any worker forks (Rails 8.1 registry bridged via
+        # rspec-core's parallelize_before_fork).
+        if RSpec.configuration.respond_to?(:parallelize_before_fork)
+          before_fork_lines = File.readlines(before_fork_log).map(&:strip)
+          expect(before_fork_lines).to eq(["before-fork:#{Process.pid}"])
+        end
       end
     end
 
@@ -562,9 +895,9 @@ RSpec.describe RSpec::Rails::ParallelConfiguration do
             server = TCPServer.new("127.0.0.1", port)
             server.close
           rescue Errno::EADDRINUSE
-            # Random port inside the band happened to be in use on the
-            # host; the rspec-rails assignment still succeeded, which is
-            # what this spec cares about. Log the port unconditionally.
+            # The deterministic port happened to be in use on the host;
+            # the rspec-rails assignment still succeeded, which is what
+            # this spec cares about. Log the port unconditionally.
           end
           File.open(log, "a") { |f| f.puts "worker:#{n}:port:#{port}" }
         end
@@ -587,8 +920,8 @@ RSpec.describe RSpec::Rails::ParallelConfiguration do
         end
 
         expect(ports_by_worker.values.uniq.size).to eq(2)
-        expect(ports_by_worker["0"]).to be_between(9001, 9999)
-        expect(ports_by_worker["1"]).to be_between(10_001, 10_999)
+        expect(ports_by_worker["0"]).to eq(9000)
+        expect(ports_by_worker["1"]).to eq(9001)
       end
     end
 
