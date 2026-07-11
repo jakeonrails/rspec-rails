@@ -1,0 +1,23 @@
+source "https://rubygems.org"
+
+gem "rails"
+gem "sqlite3"
+
+# This fixture app must run against the same local rspec monorepo checkout
+# as the enclosing rspec-rails test suite -- never against released gems or
+# the upstream git source, which would silently exercise the wrong
+# rspec-core. Defaults to the conventional sibling checkout; override with
+# RSPEC_MONOREPO_PATH (the integration spec passes the caller's value through).
+rspec_root = ENV["RSPEC_MONOREPO_PATH"] || File.expand_path("../../../../rspec", __dir__)
+
+%w[rspec-core rspec-expectations rspec-mocks rspec-support].each do |lib|
+  lib_path = File.join(rspec_root, lib)
+  unless File.directory?(lib_path)
+    raise "parallel_app fixture: #{lib_path} does not exist. Set " \
+          "RSPEC_MONOREPO_PATH=/path/to/rspec (the rspec monorepo checkout " \
+          "containing #{lib}/)."
+  end
+  gem lib, path: lib_path
+end
+
+gem "rspec-rails", path: File.expand_path("../../..", __dir__)

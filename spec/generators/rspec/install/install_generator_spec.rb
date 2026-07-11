@@ -47,6 +47,18 @@ RSpec.describe Rspec::Generators::InstallGenerator, type: :generator do
     match(/config\.filter_rails_from_backtrace!/m)
   end
 
+  def mention_parallel_workers
+    match(/#\s*config\.default_parallel_workers = :number_of_processors/m)
+  end
+
+  def default_to_parallel_workers
+    match(/^\s*config\.default_parallel_workers = :number_of_processors/m)
+  end
+
+  def mention_skip_test_database_truncate
+    match(/SKIP_TEST_DATABASE_TRUNCATE/m)
+  end
+
   setup_default_destination
 
   let(:rails_helper) { content_for('spec/rails_helper.rb') }
@@ -100,6 +112,17 @@ RSpec.describe Rspec::Generators::InstallGenerator, type: :generator do
       run_generator
       expect(rails_helper).to maintain_test_schema
     end
+
+    specify "mentions parallel workers as a commented-out opt-in" do
+      run_generator
+      expect(rails_helper).to mention_parallel_workers
+      expect(rails_helper).not_to default_to_parallel_workers
+    end
+
+    specify "mentions SKIP_TEST_DATABASE_TRUNCATE for transactional-fixtures users" do
+      run_generator
+      expect(rails_helper).to mention_skip_test_database_truncate
+    end
   end
 
   context "generates spec/rails_helper.rb", "without ActiveRecord available" do
@@ -138,6 +161,12 @@ RSpec.describe Rspec::Generators::InstallGenerator, type: :generator do
       run_generator
       expect(rails_helper).not_to use_active_record_migration
       expect(rails_helper).not_to maintain_test_schema
+    end
+
+    specify "without parallel testing defaults" do
+      run_generator
+      expect(rails_helper).not_to default_to_parallel_workers
+      expect(rails_helper).not_to mention_skip_test_database_truncate
     end
   end
 end

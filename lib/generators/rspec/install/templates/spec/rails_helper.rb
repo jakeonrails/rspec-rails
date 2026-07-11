@@ -53,6 +53,36 @@ RSpec.configure do |config|
   # You can uncomment this line to turn off ActiveRecord support entirely.
   # config.use_active_record = false
 
+  # Uncomment to run specs in parallel across CPU cores when `fork` is
+  # available. Each worker gets its own database
+  # (<database>_<worker_number>, or <database>-<worker_number> on Rails
+  # <= 8.0), its own log/test-<worker_number>.log, and its own Capybara
+  # port. Set the value to an integer instead of :number_of_processors to
+  # cap the worker count.
+  #
+  # Biggest gotcha: a `before(:suite)` block in this file runs only in
+  # this parent process and never reaches forked workers, so seeding done
+  # there is invisible to every worker's database. Move that seeding into
+  # `config.parallelize_setup { |worker| ... }` instead, which runs once
+  # per worker after its database exists.
+  #
+  # See features/Parallel.md for the full write-up (CLI flags, known
+  # interactions with SimpleCov/JUnit/VCR/parallel_tests, etc).
+  #
+  # if config.respond_to?(:default_parallel_workers=) && Process.respond_to?(:fork)
+  #   config.default_parallel_workers = :number_of_processors
+  # end
+
+  # Rails truncates each per-worker database at worker BOOT (not after the
+  # run) when its schema is already up to date. With
+  # `use_transactional_fixtures` on, every example already rolls back its
+  # own transaction, so that boot-time truncation is redundant -- and slow
+  # on large schemas. Uncomment to skip it:
+  #   ENV['SKIP_TEST_DATABASE_TRUNCATE'] ||= '1'
+  # Caveat: skipping it means data committed outside a transaction by a
+  # previous run (aborted mid-suite, or written by non-transactional
+  # examples) persists into the next run instead of being wiped.
+
 <% else -%>
   # Remove this line to enable support for ActiveRecord
   config.use_active_record = false

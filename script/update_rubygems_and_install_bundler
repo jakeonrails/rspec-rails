@@ -5,8 +5,15 @@ set -e
 source script/functions.sh
 
 if is_ruby_3_2_plus; then
-  gem update --no-document --system
-  gem install --no-document bundler
+  # Pinned to 4.0.14: bundler 4.0.15 regressed `bundler/inline` (used by
+  # `snippets/`) — after it auto-installs the missing gems, a gem with a
+  # non-default `require_paths` (concurrent-ruby uses `lib/concurrent-ruby`)
+  # is put on the load path as plain `lib`, so `require "rails"` fails with
+  # `cannot load such file -- concurrent/map`. Bisected to the bundler gem
+  # itself (4.0.14 passes under rubygems 4.0.16); suspected fallout of
+  # rubygems/rubygems#9618. Drop these pins once a fixed bundler ships.
+  gem update --no-document --system '4.0.14'
+  gem install --no-document bundler -v '4.0.14'
 else
   gem update --no-document --system '3.4.22'
   gem install --no-document bundler -v '2.6.9'
